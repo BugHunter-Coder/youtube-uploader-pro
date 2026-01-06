@@ -43,6 +43,7 @@ const Index = () => {
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
+  const [preparedUploadUrl, setPreparedUploadUrl] = useState<string | null>(null);
 
   // Check for saved YouTube auth on mount + when OAuth finishes in another tab/window
   useEffect(() => {
@@ -111,6 +112,7 @@ const Index = () => {
     setUploadedVideoUrl(null);
     setSelectedFile(null);
     setSourceUrl(null);
+    setPreparedUploadUrl(null);
 
     if (!/^https?:\/\//i.test(url)) {
       toast.error("Please paste a valid URL (http/https).");
@@ -194,6 +196,7 @@ const Index = () => {
     setError("");
     setProgress(0);
     setSourceUrl(null);
+    setPreparedUploadUrl(null);
 
     const titleFromName = file.name.replace(/\.[^.]+$/, "");
     const now = new Date().toISOString();
@@ -332,6 +335,57 @@ const Index = () => {
     }
   };
 
+  const downloadAndPrepareForUpload = async (videoId: string) => {
+    const pythonServiceUrl = import.meta.env.VITE_PYTHON_DOWNLOADER_URL || "http://localhost:8000";
+    if (!pythonServiceUrl || pythonServiceUrl === "false") {
+      throw new Error("Python downloader is not configured. Set VITE_PYTHON_DOWNLOADER_URL.");
+    }
+
+    // 1) Ask python service to proxy an MP4 (avoids CORS + ffmpeg)
+    setStatus("downloading");
+    setProgress(10);
+    const res = await fetch(`${pythonServiceUrl}/download-file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoId }),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`Python download failed (HTTP ${res.status}). ${t.slice(0, 200)}`);
+    }
+
+    setProgress(40);
+    const blob = await res.blob();
+    if (!blob.size) {
+      throw new Error("Downloaded file is empty");
+    }
+
+    // 2) Upload to Supabase Storage so the Edge Function (YouTube upload) can fetch it reliably
+    const bucket = import.meta.env.VITE_UPLOAD_BUCKET || "uploads";
+    const path = `incoming/youtube/${videoId}-${Date.now()}.mp4`;
+    const { error: uploadErr } = await supabase.storage
+      .from(bucket)
+      .upload(path, blob, { upsert: true, contentType: "video/mp4" });
+    if (uploadErr) {
+      throw new Error(`Failed to upload downloaded video to Storage (${uploadErr.message})`);
+    }
+
+    setProgress(70);
+    const signed = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
+    const url =
+      !signed.error && signed.data?.signedUrl
+        ? signed.data.signedUrl
+        : supabase.storage.from(bucket).getPublicUrl(path).data.publicUrl;
+
+    if (!url) throw new Error("Failed to create a URL for the downloaded file");
+
+    setPreparedUploadUrl(url);
+    setProgress(100);
+    setStatus("idle");
+    setProgress(0);
+    toast.success("Downloaded and ready to preview");
+  };
+
   const handleTransfer = async () => {
     if (!videoInfo || !youtubeAuth) {
       toast.error("Please connect your YouTube channel first");
@@ -359,66 +413,10 @@ const Index = () => {
       let uploadSourceUrl: string | null = null;
 
       if (mode === "youtube") {
-        // Step 1: Try Python service FIRST (most reliable)
-        setStatus("downloading");
-        setProgress(15);
-        
-        console.log("🎯 Attempting to download using Python yt-dlp service...");
-        try {
-          const pythonDownloadUrl = await downloadFromPythonService(videoInfo.videoId);
-          
-          if (pythonDownloadUrl) {
-            // Python service succeeded - use it directly
-            uploadSourceUrl = pythonDownloadUrl;
-            setProgress(25);
-            console.log("✅ Using download URL from Python service");
-            toast.success("Downloaded using Python yt-dlp service");
-          } else {
-            // Python service failed or not available - fall back to Edge Function
-            console.log("⚠️  Python service not available, using Supabase Edge Function...");
-            setProgress(20);
-            
-            const { data: downloadData, error: downloadError } = await supabase.functions.invoke(
-              "youtube-download",
-              {
-                body: { videoId: videoInfo.videoId },
-              }
-            );
-
-            if (downloadError || downloadData.error) {
-              throw new Error(downloadData?.error || downloadError?.message || "Failed to get download URL");
-            }
-
-            uploadSourceUrl = downloadData.downloadUrl;
-            console.log("✅ Using download URL from Supabase Edge Function");
-          }
-        } catch (pythonError) {
-          // If Python service throws an error (not just returns null), show it but still try Edge Function
-          console.error("Python service error:", pythonError);
-          const pythonErrorMsg = pythonError instanceof Error ? pythonError.message : String(pythonError);
-          
-          // Only try Edge Function if Python error is not a critical failure
-          if (pythonErrorMsg.includes("not accessible") || pythonErrorMsg.includes("Failed to fetch")) {
-            console.log("Python service not running, trying Edge Function...");
-            setProgress(20);
-            
-            const { data: downloadData, error: downloadError } = await supabase.functions.invoke(
-              "youtube-download",
-              {
-                body: { videoId: videoInfo.videoId },
-              }
-            );
-
-            if (downloadError || downloadData.error) {
-              throw new Error(downloadData?.error || downloadError?.message || "Failed to get download URL");
-            }
-
-            uploadSourceUrl = downloadData.downloadUrl;
-          } else {
-            // Python service had a real error (video restriction, etc.) - throw it
-            throw pythonError;
-          }
+        if (!preparedUploadUrl) {
+          throw new Error("Please download & preview the video first.");
         }
+        uploadSourceUrl = preparedUploadUrl;
       } else if (mode === "direct") {
         uploadSourceUrl = sourceUrl;
       } else {
@@ -535,6 +533,7 @@ const Index = () => {
     setSelectedFile(null);
     setSourceUrl(null);
     setMode("youtube");
+    setPreparedUploadUrl(null);
   };
 
   const isProcessing = status === "fetching" || status === "downloading" || status === "uploading";
@@ -593,7 +592,69 @@ const Index = () => {
               />
             </div>
 
-            {youtubeAuth && (
+            {mode === "youtube" && (
+              <div className="glass-card p-6">
+                <h3 className="text-lg font-semibold mb-4">Step 3: Download & Preview</h3>
+
+                {!preparedUploadUrl ? (
+                  <>
+                    <Button
+                      onClick={() => downloadAndPrepareForUpload(videoInfo.videoId)}
+                      disabled={isProcessing}
+                      className="w-full"
+                      variant="hero"
+                      size="lg"
+                    >
+                      <Rocket className="mr-2 h-5 w-5" />
+                      {isProcessing ? "Downloading..." : "Download & Preview"}
+                    </Button>
+                    <p className="text-xs text-muted-foreground text-center mt-3">
+                      We download the video using Python, store it in Storage, and show a preview before upload.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="rounded-lg overflow-hidden border border-border/50 bg-background/30">
+                      <video
+                        src={preparedUploadUrl}
+                        controls
+                        className="w-full h-auto"
+                        preload="metadata"
+                      />
+                    </div>
+                    <div className="mt-4 flex gap-3">
+                      <Button
+                        onClick={() => setPreparedUploadUrl(null)}
+                        variant="outline"
+                        className="flex-1"
+                        disabled={isProcessing}
+                      >
+                        Re-download
+                      </Button>
+                      {youtubeAuth && (
+                        <Button
+                          onClick={handleTransfer}
+                          disabled={isProcessing}
+                          className="flex-1"
+                          variant="hero"
+                        >
+                          <Rocket className="mr-2 h-5 w-5" />
+                          {isProcessing ? "Uploading..." : "Upload to My Channel"}
+                        </Button>
+                      )}
+                    </div>
+
+                    {!youtubeAuth && (
+                      <p className="text-xs text-muted-foreground text-center mt-3">
+                        Preview ready. Connect your channel to upload.
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {youtubeAuth && mode !== "youtube" && (
               <div className="glass-card p-6">
                 <h3 className="text-lg font-semibold mb-4">Step 3: Transfer Video</h3>
                 <Button
