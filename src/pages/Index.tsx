@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { Header } from "@/components/Header";
 import { VideoUrlInput } from "@/components/VideoUrlInput";
-import { VideoPreview } from "@/components/VideoPreview";
+import { EditableVideoPreview } from "@/components/EditableVideoPreview";
 import { TransferStatus } from "@/components/TransferStatus";
+import { YouTubeConnect } from "@/components/YouTubeConnect";
+import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { Upload, Shield, Zap } from "lucide-react";
+import { Upload, Shield, Zap, Rocket } from "lucide-react";
 
 type StatusStep = "idle" | "fetching" | "downloading" | "uploading" | "complete" | "error";
 
@@ -20,11 +22,21 @@ interface VideoInfo {
   videoId: string;
 }
 
+interface YouTubeAuth {
+  accessToken: string;
+  refreshToken: string;
+  channel: { title: string; thumbnail: string } | null;
+}
+
 const Index = () => {
   const [status, setStatus] = useState<StatusStep>("idle");
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [error, setError] = useState<string>("");
   const [progress, setProgress] = useState(0);
+  const [customTitle, setCustomTitle] = useState("");
+  const [customDescription, setCustomDescription] = useState("");
+  const [youtubeAuth, setYoutubeAuth] = useState<YouTubeAuth | null>(null);
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
 
   const extractVideoId = (url: string): string | null => {
     const patterns = [
@@ -37,7 +49,7 @@ const Index = () => {
     return null;
   };
 
-  const handleTransfer = async (url: string) => {
+  const handleFetchVideo = async (url: string) => {
     const videoId = extractVideoId(url);
     if (!videoId) {
       toast.error("Could not extract video ID from URL");
@@ -47,9 +59,9 @@ const Index = () => {
     setStatus("fetching");
     setError("");
     setProgress(0);
+    setUploadedVideoUrl(null);
 
     try {
-      // Fetch video info
       const { data: infoData, error: infoError } = await supabase.functions.invoke(
         "youtube-transfer",
         {
@@ -61,61 +73,191 @@ const Index = () => {
       if (infoData.error) throw new Error(infoData.error);
 
       setVideoInfo(infoData.video);
-      setStatus("downloading");
-      setProgress(25);
+      setCustomTitle(infoData.video.title);
+      setCustomDescription(infoData.video.description || "");
+      setStatus("idle");
+      toast.success("Video found! Edit the title and description, then connect your channel.");
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "Failed to fetch video info");
+      toast.error("Failed to fetch video info");
+    }
+  };
 
-      // Simulate download progress
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      setProgress(50);
+  const handleMetadataChange = (title: string, description: string) => {
+    setCustomTitle(title);
+    setCustomDescription(description);
+  };
 
+  const handleYouTubeConnect = (tokens: YouTubeAuth) => {
+    setYoutubeAuth(tokens);
+  };
+
+  const handleTransfer = async () => {
+    if (!videoInfo || !youtubeAuth) {
+      toast.error("Please connect your YouTube channel first");
+      return;
+    }
+
+    setStatus("downloading");
+    setError("");
+    setProgress(10);
+
+    try {
+      // Step 1: Get download URL
+      const { data: downloadData, error: downloadError } = await supabase.functions.invoke(
+        "youtube-download",
+        {
+          body: { videoId: videoInfo.videoId },
+        }
+      );
+
+      if (downloadError || downloadData.error) {
+        throw new Error(downloadData?.error || downloadError?.message || "Failed to get download URL");
+      }
+
+      setProgress(30);
       setStatus("uploading");
-      setProgress(75);
 
-      // Start transfer
-      const { data: transferData, error: transferError } =
-        await supabase.functions.invoke("youtube-transfer", {
-          body: { action: "transfer", videoId, videoInfo: infoData.video },
-        });
+      // Step 2: Upload to YouTube
+      const { data: uploadData, error: uploadError } = await supabase.functions.invoke(
+        "youtube-upload",
+        {
+          body: {
+            accessToken: youtubeAuth.accessToken,
+            downloadUrl: downloadData.downloadUrl,
+            title: customTitle || videoInfo.title,
+            description: customDescription || videoInfo.description,
+          },
+        }
+      );
 
-      if (transferError) throw new Error(transferError.message);
-      if (transferData.error) throw new Error(transferData.error);
+      if (uploadError || uploadData.error) {
+        throw new Error(uploadData?.error || uploadError?.message || "Failed to upload video");
+      }
 
       setProgress(100);
       setStatus("complete");
-      toast.success("Video transferred successfully!");
+      setUploadedVideoUrl(uploadData.videoUrl);
+      toast.success("Video uploaded successfully!");
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : "An unexpected error occurred");
-      toast.error("Transfer failed");
+      const errorMessage = err instanceof Error ? err.message : "Transfer failed";
+      setError(errorMessage);
+      toast.error(errorMessage);
     }
   };
+
+  const handleReset = () => {
+    setStatus("idle");
+    setVideoInfo(null);
+    setError("");
+    setProgress(0);
+    setCustomTitle("");
+    setCustomDescription("");
+    setUploadedVideoUrl(null);
+  };
+
+  const isProcessing = status === "fetching" || status === "downloading" || status === "uploading";
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
-      
+
       <main className="flex-1 container max-w-4xl mx-auto px-4 py-8">
         <div className="text-center mb-12 animate-fade-in">
           <h2 className="text-4xl md:text-5xl font-bold mb-4">
             <span className="gradient-text">Transfer Your Videos</span>
           </h2>
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-            Easily migrate your own YouTube videos between channels. 
-            Just paste the video URL and we'll handle the rest.
+            Download any YouTube video and upload it to your channel with custom title and description.
           </p>
         </div>
 
         <div className="glass-card p-8 mb-8 animate-fade-in" style={{ animationDelay: "0.1s" }}>
-          <VideoUrlInput onSubmit={handleTransfer} isLoading={status !== "idle" && status !== "complete" && status !== "error"} />
+          <VideoUrlInput
+            onSubmit={handleFetchVideo}
+            isLoading={status === "fetching"}
+          />
         </div>
 
-        {videoInfo && <VideoPreview video={videoInfo} />}
-        
-        <div className="mt-6">
-          <TransferStatus status={status} error={error} progress={progress} />
-        </div>
+        {videoInfo && status !== "complete" && (
+          <div className="space-y-6 animate-fade-in">
+            <EditableVideoPreview
+              video={videoInfo}
+              onMetadataChange={handleMetadataChange}
+            />
 
-        {status === "idle" && (
+            <div className="glass-card p-6">
+              <h3 className="text-lg font-semibold mb-4">Step 2: Connect Your Channel</h3>
+              <YouTubeConnect
+                onConnect={handleYouTubeConnect}
+                isConnected={!!youtubeAuth}
+                channelInfo={youtubeAuth?.channel}
+              />
+            </div>
+
+            {youtubeAuth && (
+              <div className="glass-card p-6">
+                <h3 className="text-lg font-semibold mb-4">Step 3: Transfer Video</h3>
+                <Button
+                  onClick={handleTransfer}
+                  disabled={isProcessing}
+                  className="w-full"
+                  variant="hero"
+                  size="lg"
+                >
+                  <Rocket className="mr-2 h-5 w-5" />
+                  {isProcessing ? "Transferring..." : "Transfer to My Channel"}
+                </Button>
+                <p className="text-xs text-muted-foreground text-center mt-3">
+                  Video will be uploaded as Private. You can change visibility on YouTube.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(status === "downloading" || status === "uploading") && (
+          <div className="mt-6">
+            <TransferStatus status={status} error={error} progress={progress} />
+          </div>
+        )}
+
+        {status === "complete" && uploadedVideoUrl && (
+          <div className="glass-card p-8 text-center animate-fade-in">
+            <div className="w-16 h-16 mx-auto mb-4 bg-primary/10 rounded-full flex items-center justify-center">
+              <Upload className="h-8 w-8 text-primary" />
+            </div>
+            <h3 className="text-2xl font-bold mb-2">Transfer Complete!</h3>
+            <p className="text-muted-foreground mb-6">
+              Your video has been uploaded to your channel as a Private video.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              <Button asChild variant="hero">
+                <a href={uploadedVideoUrl} target="_blank" rel="noopener noreferrer">
+                  View on YouTube
+                </a>
+              </Button>
+              <Button onClick={handleReset} variant="outline">
+                Transfer Another Video
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {status === "error" && (
+          <div className="mt-6">
+            <TransferStatus status={status} error={error} progress={progress} />
+            <div className="text-center mt-4">
+              <Button onClick={handleReset} variant="outline">
+                Try Again
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!videoInfo && status === "idle" && (
           <div className="grid md:grid-cols-3 gap-6 mt-12 animate-fade-in" style={{ animationDelay: "0.2s" }}>
             <div className="glass-card p-6 text-center">
               <div className="w-12 h-12 mx-auto mb-4 bg-primary/10 rounded-xl flex items-center justify-center">
@@ -126,17 +268,17 @@ const Index = () => {
                 Paste a URL and transfer videos in seconds
               </p>
             </div>
-            
+
             <div className="glass-card p-6 text-center">
               <div className="w-12 h-12 mx-auto mb-4 bg-primary/10 rounded-xl flex items-center justify-center">
                 <Shield className="h-6 w-6 text-primary" />
               </div>
-              <h3 className="font-semibold text-foreground mb-2">Your Content Only</h3>
+              <h3 className="font-semibold text-foreground mb-2">Edit Metadata</h3>
               <p className="text-sm text-muted-foreground">
-                Only transfer videos you own or have rights to
+                Change title and description before uploading
               </p>
             </div>
-            
+
             <div className="glass-card p-6 text-center">
               <div className="w-12 h-12 mx-auto mb-4 bg-primary/10 rounded-xl flex items-center justify-center">
                 <Zap className="h-6 w-6 text-primary" />
