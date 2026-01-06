@@ -9,6 +9,9 @@ from flask_cors import CORS
 import subprocess
 import sys
 import os
+from flask import Response, stream_with_context
+import urllib.request
+import ssl
 from urllib.parse import urlparse, parse_qs
 
 app = Flask(__name__)
@@ -34,10 +37,11 @@ def get_download_url(video_id):
     
     try:
         # Use python3 -m yt_dlp (most reliable)
+        # Prefer progressive MP4 (no ffmpeg needed). These are usually itag 18 (360p) / 22 (720p).
         cmd = [
             'python3', '-m', 'yt_dlp',
             '--no-playlist',
-            '--format', 'best',
+            '--format', '18/22/best',
             '--get-url',
             '--no-warnings',
             video_url
@@ -81,6 +85,55 @@ def get_download_url(video_id):
     
     print("❌ Failed to get download URL", file=sys.stderr)
     return None
+
+
+@app.route('/download-file', methods=['POST'])
+def download_file():
+    """
+    Streams an MP4 file to the browser.
+    This is used for previewing/downloading from the frontend without CORS issues.
+    """
+    try:
+        data = request.get_json() or {}
+        video_id = data.get('videoId') or data.get('video_id')
+        video_url = data.get('url')
+
+        if video_url and not video_id:
+            video_id = extract_video_id(video_url)
+
+        if not video_id:
+            return jsonify({"error": "videoId or url parameter is required"}), 400
+
+        mp4_url = get_download_url(video_id)
+        if not mp4_url:
+            return jsonify({"error": "Failed to get a direct MP4 URL"}), 500
+
+        def generate():
+            # Some local Python installs on macOS may not have system CA certs configured.
+            # For local-dev reliability, we use an unverified SSL context when proxying.
+            ctx = ssl._create_unverified_context()
+            req = urllib.request.Request(
+                mp4_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, context=ctx) as r:
+                while True:
+                    chunk = r.read(1024 * 256)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        headers = {
+            "Content-Disposition": f'inline; filename="{video_id}.mp4"',
+        }
+        return Response(stream_with_context(generate()), mimetype="video/mp4", headers=headers)
+
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"ERROR in download_file endpoint: {str(e)}", file=sys.stderr)
+        print(error_trace, file=sys.stderr)
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 @app.route('/download', methods=['POST', 'GET'])
 def download():

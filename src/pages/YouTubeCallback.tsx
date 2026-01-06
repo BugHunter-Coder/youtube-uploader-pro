@@ -46,12 +46,17 @@ const YouTubeCallback = () => {
           throw new Error(tokenData?.error || tokenError?.message || "Failed to exchange code");
         }
 
-        // Save tokens to localStorage
+        // Save tokens to localStorage (include expiry so we can auto-refresh later)
+        const expiresInSec = Number(tokenData.expiresIn || tokenData.expires_in || 3600);
+        // Refresh a bit early to avoid race conditions
+        const expiresAt = Date.now() + Math.max(0, expiresInSec - 60) * 1000;
+
         localStorage.setItem(
           "youtube_auth",
           JSON.stringify({
             accessToken: tokenData.accessToken,
             refreshToken: tokenData.refreshToken,
+            expiresAt,
             channel: tokenData.channel,
           })
         );

@@ -5,12 +5,18 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 interface YouTubeConnectProps {
-  onConnect: (tokens: { accessToken: string; refreshToken: string; channel: { title: string; thumbnail: string } }) => void;
+  onConnect: (tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt?: number;
+    channel: { title: string; thumbnail: string };
+  }) => void;
+  onDisconnect: () => void;
   isConnected: boolean;
   channelInfo?: { title: string; thumbnail: string } | null;
 }
 
-export function YouTubeConnect({ onConnect, isConnected, channelInfo }: YouTubeConnectProps) {
+export function YouTubeConnect({ onConnect, onDisconnect, isConnected, channelInfo }: YouTubeConnectProps) {
   const [isConnecting, setIsConnecting] = useState(false);
 
   const handleConnect = async () => {
@@ -72,20 +78,31 @@ export function YouTubeConnect({ onConnect, isConnected, channelInfo }: YouTubeC
 
   if (isConnected && channelInfo) {
     return (
-      <div className="flex items-center gap-3 p-4 rounded-lg bg-primary/10 border border-primary/20">
-        <CheckCircle2 className="h-5 w-5 text-primary" />
-        <div className="flex items-center gap-2">
-          {channelInfo.thumbnail && (
-            <img
-              src={channelInfo.thumbnail}
-              alt={channelInfo.title}
-              className="w-8 h-8 rounded-full"
-            />
-          )}
-          <span className="text-sm font-medium">
-            Connected to <span className="text-primary">{channelInfo.title}</span>
-          </span>
+      <div className="flex items-center justify-between gap-4 p-4 rounded-lg bg-primary/10 border border-primary/20">
+        <div className="flex items-center gap-3">
+          <CheckCircle2 className="h-5 w-5 text-primary" />
+          <div className="flex items-center gap-2">
+            {channelInfo.thumbnail && (
+              <img
+                src={channelInfo.thumbnail}
+                alt={channelInfo.title}
+                className="w-8 h-8 rounded-full"
+              />
+            )}
+            <span className="text-sm font-medium">
+              Connected to <span className="text-primary">{channelInfo.title}</span>
+            </span>
+          </div>
         </div>
+
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onDisconnect}
+        >
+          Sign out
+        </Button>
       </div>
     );
   }

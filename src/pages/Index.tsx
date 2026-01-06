@@ -27,6 +27,7 @@ interface VideoInfo {
 interface YouTubeAuth {
   accessToken: string;
   refreshToken: string;
+  expiresAt?: number;
   channel: { title: string; thumbnail: string } | null;
 }
 
@@ -216,6 +217,65 @@ const Index = () => {
     setYoutubeAuth(tokens);
   };
 
+  const clearYouTubeAuth = (reason?: string) => {
+    try {
+      localStorage.removeItem("youtube_auth");
+    } catch {
+      // ignore
+    }
+    setYoutubeAuth(null);
+    if (reason) toast.error(reason);
+  };
+
+  const refreshYouTubeAccessToken = async (refreshToken: string) => {
+    const { data, error } = await supabase.functions.invoke("youtube-oauth", {
+      body: { action: "refreshToken", refreshToken },
+    });
+
+    if (error || data?.error) {
+      throw new Error(data?.error || error?.message || "Failed to refresh token");
+    }
+
+    const expiresInSec = Number(data.expiresIn || data.expires_in || 3600);
+    const expiresAt = Date.now() + Math.max(0, expiresInSec - 60) * 1000;
+    return { accessToken: data.accessToken as string, expiresAt };
+  };
+
+  const ensureValidYouTubeAuth = async (): Promise<YouTubeAuth> => {
+    if (!youtubeAuth) throw new Error("Please connect your YouTube channel first");
+
+    // If we don't know expiry, just proceed (we'll retry on auth failure)
+    if (!youtubeAuth.expiresAt) return youtubeAuth;
+
+    // Token still valid with a small buffer
+    if (Date.now() < youtubeAuth.expiresAt) return youtubeAuth;
+
+    if (!youtubeAuth.refreshToken) {
+      clearYouTubeAuth("Session expired. Please reconnect your YouTube channel.");
+      throw new Error("Session expired. Please reconnect your YouTube channel.");
+    }
+
+    try {
+      const refreshed = await refreshYouTubeAccessToken(youtubeAuth.refreshToken);
+      const updated: YouTubeAuth = {
+        ...youtubeAuth,
+        accessToken: refreshed.accessToken,
+        expiresAt: refreshed.expiresAt,
+      };
+      setYoutubeAuth(updated);
+      try {
+        localStorage.setItem("youtube_auth", JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      toast.success("Session refreshed");
+      return updated;
+    } catch {
+      clearYouTubeAuth("Session expired. Please reconnect your YouTube channel.");
+      throw new Error("Session expired. Please reconnect your YouTube channel.");
+    }
+  };
+
   // Function to call Python service directly
   const downloadFromPythonService = async (videoId: string): Promise<string | null> => {
     // Get Python service URL from environment variable
@@ -402,20 +462,54 @@ const Index = () => {
       setStatus("uploading");
 
       // Step 2: Upload to YouTube
-      const { data: uploadData, error: uploadError } = await supabase.functions.invoke(
-        "youtube-upload",
-        {
+      const invokeUpload = async (accessToken: string) =>
+        supabase.functions.invoke("youtube-upload", {
           body: {
-            accessToken: youtubeAuth.accessToken,
+            accessToken,
             downloadUrl: uploadSourceUrl,
             title: customTitle || videoInfo.title,
             description: customDescription || videoInfo.description,
           },
-        }
-      );
+        });
 
-      if (uploadError || uploadData.error) {
-        throw new Error(uploadData?.error || uploadError?.message || "Failed to upload video");
+      let auth = await ensureValidYouTubeAuth();
+      let { data: uploadData, error: uploadError } = await invokeUpload(auth.accessToken);
+
+      // If token was revoked/expired unexpectedly, try refresh once and retry upload
+      if ((uploadError || uploadData?.error) && youtubeAuth?.refreshToken) {
+        const msg = String(uploadData?.error || uploadError?.message || "");
+        const looksLikeAuthError =
+          /unauthori|auth|credential|token|invalid/i.test(msg);
+
+        if (looksLikeAuthError) {
+          try {
+            const refreshed = await refreshYouTubeAccessToken(youtubeAuth.refreshToken);
+            const updated: YouTubeAuth = {
+              ...(youtubeAuth as YouTubeAuth),
+              accessToken: refreshed.accessToken,
+              expiresAt: refreshed.expiresAt,
+            };
+            setYoutubeAuth(updated);
+            try {
+              localStorage.setItem("youtube_auth", JSON.stringify(updated));
+            } catch {
+              // ignore
+            }
+
+            ({ data: uploadData, error: uploadError } = await invokeUpload(updated.accessToken));
+          } catch {
+            clearYouTubeAuth("Session expired. Please reconnect your YouTube channel.");
+          }
+        }
+      }
+
+      if (uploadError || uploadData?.error) {
+        const msg = uploadData?.error || uploadError?.message || "Failed to upload video";
+        // If auth is bad, force re-auth UX
+        if (/unauthori|auth|credential|token|invalid/i.test(String(msg))) {
+          clearYouTubeAuth("Session expired. Please reconnect your YouTube channel.");
+        }
+        throw new Error(msg);
       }
 
       setProgress(100);
@@ -493,6 +587,7 @@ const Index = () => {
               <h3 className="text-lg font-semibold mb-4">Step 2: Connect Your Channel</h3>
               <YouTubeConnect
                 onConnect={handleYouTubeConnect}
+                onDisconnect={() => clearYouTubeAuth("Disconnected")}
                 isConnected={!!youtubeAuth}
                 channelInfo={youtubeAuth?.channel}
               />
