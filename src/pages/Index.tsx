@@ -44,6 +44,7 @@ const Index = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [preparedUploadUrl, setPreparedUploadUrl] = useState<string | null>(null);
+  const [preparedUploadLocalOnly, setPreparedUploadLocalOnly] = useState(false);
 
   // Check for saved YouTube auth on mount + when OAuth finishes in another tab/window
   useEffect(() => {
@@ -113,6 +114,7 @@ const Index = () => {
     setSelectedFile(null);
     setSourceUrl(null);
     setPreparedUploadUrl(null);
+    setPreparedUploadLocalOnly(false);
 
     if (!/^https?:\/\//i.test(url)) {
       toast.error("Please paste a valid URL (http/https).");
@@ -367,7 +369,21 @@ const Index = () => {
       .from(bucket)
       .upload(path, blob, { upsert: true, contentType: "video/mp4" });
     if (uploadErr) {
-      throw new Error(`Failed to upload downloaded video to Storage (${uploadErr.message})`);
+      const msg = (uploadErr as any)?.message ? String((uploadErr as any).message) : String(uploadErr);
+      const status = (uploadErr as any)?.statusCode ?? (uploadErr as any)?.status;
+      if (status === 404 || /bucket not found/i.test(msg)) {
+        // Local-dev fallback: still allow preview via the local Python proxy endpoint (GET-friendly),
+        // but block the actual upload step since Supabase Edge Functions can't fetch localhost.
+        setPreparedUploadLocalOnly(true);
+        setPreparedUploadUrl(`${pythonServiceUrl}/download-file?videoId=${encodeURIComponent(videoId)}`);
+        setStatus("idle");
+        setProgress(0);
+        toast.warning(
+          `Storage bucket "${bucket}" was not found. Preview will use the local Python service only. Create the bucket (or set VITE_UPLOAD_BUCKET) to enable uploading.`
+        );
+        return;
+      }
+      throw new Error(`Failed to upload downloaded video to Storage (${msg})`);
     }
 
     setProgress(70);
@@ -380,6 +396,7 @@ const Index = () => {
     if (!url) throw new Error("Failed to create a URL for the downloaded file");
 
     setPreparedUploadUrl(url);
+    setPreparedUploadLocalOnly(false);
     setProgress(100);
     setStatus("idle");
     setProgress(0);
@@ -416,40 +433,81 @@ const Index = () => {
         if (!preparedUploadUrl) {
           throw new Error("Please download & preview the video first.");
         }
+        // If we're in local-only mode, upload directly via the local Python service (no Supabase Storage).
+        if (preparedUploadLocalOnly) {
+          const pythonServiceUrl =
+            import.meta.env.VITE_PYTHON_DOWNLOADER_URL || "http://localhost:8000";
+          if (!pythonServiceUrl || pythonServiceUrl === "false") {
+            throw new Error("Python downloader is not configured. Set VITE_PYTHON_DOWNLOADER_URL.");
+          }
+
+          setProgress(30);
+          setStatus("uploading");
+          const auth = await ensureValidYouTubeAuth();
+          const resp = await fetch(`${pythonServiceUrl}/upload-to-youtube`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              accessToken: auth.accessToken,
+              videoId: videoInfo.videoId,
+              title: customTitle || videoInfo.title,
+              description: customDescription || videoInfo.description,
+            }),
+          });
+          if (!resp.ok) {
+            const t = await resp.text().catch(() => "");
+            throw new Error(`Local upload failed (HTTP ${resp.status}). ${t.slice(0, 300)}`);
+          }
+          const data = await resp.json().catch(() => ({} as any));
+          if (data?.error) throw new Error(String(data.error));
+          if (!data?.videoUrl) throw new Error("Local upload succeeded but no videoUrl was returned");
+
+          setProgress(100);
+          setStatus("complete");
+          setUploadedVideoUrl(data.videoUrl);
+          toast.success("Video uploaded successfully!");
+          return;
+        }
+
         uploadSourceUrl = preparedUploadUrl;
       } else if (mode === "direct") {
         uploadSourceUrl = sourceUrl;
       } else {
-        // Local file mode: upload file to Supabase Storage, then use that URL as the source
-        setStatus("downloading");
-        setProgress(20);
+        // Local file mode: upload directly via Python service (no Supabase Storage).
+        const pythonServiceUrl =
+          import.meta.env.VITE_PYTHON_DOWNLOADER_URL || "http://localhost:8000";
+        if (!pythonServiceUrl || pythonServiceUrl === "false") {
+          throw new Error("Python downloader is not configured. Set VITE_PYTHON_DOWNLOADER_URL.");
+        }
 
-        const bucket = import.meta.env.VITE_UPLOAD_BUCKET || "uploads";
+        const auth = await ensureValidYouTubeAuth();
         const file = selectedFile!;
-        const safeName = file.name.replace(/[^\w.\-() ]+/g, "_");
-        const path = `incoming/${Date.now()}-${safeName}`;
+        setStatus("uploading");
+        setProgress(30);
 
-        const { error: uploadErr } = await supabase.storage
-          .from(bucket)
-          .upload(path, file, {
-            upsert: false,
-            contentType: file.type || "video/mp4",
-          });
+        const form = new FormData();
+        form.append("accessToken", auth.accessToken);
+        form.append("title", customTitle || videoInfo.title);
+        form.append("description", customDescription || videoInfo.description);
+        form.append("file", file, file.name || "upload.mp4");
 
-        if (uploadErr) {
-          throw new Error(
-            `Failed to upload file to Storage. Ensure bucket "${bucket}" exists and allows uploads. (${uploadErr.message})`
-          );
+        const resp = await fetch(`${pythonServiceUrl}/upload-file-to-youtube`, {
+          method: "POST",
+          body: form,
+        });
+        if (!resp.ok) {
+          const t = await resp.text().catch(() => "");
+          throw new Error(`Local upload failed (HTTP ${resp.status}). ${t.slice(0, 300)}`);
         }
+        const data = await resp.json().catch(() => ({} as any));
+        if (data?.error) throw new Error(String(data.error));
+        if (!data?.videoUrl) throw new Error("Local upload succeeded but no videoUrl was returned");
 
-        // Prefer signed URL (works even if bucket is private), fallback to public URL
-        const signed = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
-        if (!signed.error && signed.data?.signedUrl) {
-          uploadSourceUrl = signed.data.signedUrl;
-        } else {
-          const pub = supabase.storage.from(bucket).getPublicUrl(path);
-          uploadSourceUrl = pub.data.publicUrl;
-        }
+        setProgress(100);
+        setStatus("complete");
+        setUploadedVideoUrl(data.videoUrl);
+        toast.success("Video uploaded successfully!");
+        return;
       }
 
       if (!uploadSourceUrl) {
@@ -617,6 +675,7 @@ const Index = () => {
                     <div className="rounded-lg overflow-hidden border border-border/50 bg-background/30">
                       <video
                         src={preparedUploadUrl}
+                        crossOrigin="anonymous"
                         controls
                         className="w-full h-auto"
                         preload="metadata"
@@ -624,7 +683,10 @@ const Index = () => {
                     </div>
                     <div className="mt-4 flex gap-3">
                       <Button
-                        onClick={() => setPreparedUploadUrl(null)}
+                        onClick={() => {
+                          setPreparedUploadUrl(null);
+                          setPreparedUploadLocalOnly(false);
+                        }}
                         variant="outline"
                         className="flex-1"
                         disabled={isProcessing}
