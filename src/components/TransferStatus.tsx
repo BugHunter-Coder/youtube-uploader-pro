@@ -6,17 +6,33 @@ interface TransferStatusProps {
   status: StatusStep;
   error?: string;
   progress?: number;
+  mode?: "youtube" | "direct" | "file";
 }
 
-const steps = [
-  { id: "fetching", label: "Fetching video info", icon: Video },
-  { id: "downloading", label: "Downloading video", icon: Download },
-  { id: "uploading", label: "Uploading to your channel", icon: Upload },
-  { id: "complete", label: "Transfer complete", icon: CheckCircle2 },
-];
-
-export function TransferStatus({ status, error, progress }: TransferStatusProps) {
+export function TransferStatus({ status, error, progress, mode = "direct" }: TransferStatusProps) {
   if (status === "idle") return null;
+
+  const steps =
+    mode === "file"
+      ? [
+          { id: "fetching", label: "Preparing file", icon: Video },
+          { id: "downloading", label: "Uploading file", icon: Download },
+          { id: "uploading", label: "Uploading to your channel", icon: Upload },
+          { id: "complete", label: "Upload complete", icon: CheckCircle2 },
+        ]
+      : mode === "youtube"
+      ? [
+          { id: "fetching", label: "Fetching video info", icon: Video },
+          { id: "downloading", label: "Downloading from YouTube (Python yt-dlp)", icon: Download },
+          { id: "uploading", label: "Uploading to your channel", icon: Upload },
+          { id: "complete", label: "Transfer complete", icon: CheckCircle2 },
+        ]
+      : [
+          { id: "fetching", label: "Preparing URL", icon: Video },
+          { id: "downloading", label: "Downloading file", icon: Download },
+          { id: "uploading", label: "Uploading to your channel", icon: Upload },
+          { id: "complete", label: "Transfer complete", icon: CheckCircle2 },
+        ];
 
   const currentStepIndex = steps.findIndex((s) => s.id === status);
 

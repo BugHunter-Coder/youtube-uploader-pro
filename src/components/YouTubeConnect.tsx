@@ -27,7 +27,7 @@ export function YouTubeConnect({ onConnect, isConnected, channelInfo }: YouTubeC
         throw new Error(data?.error || error?.message || "Failed to get auth URL");
       }
 
-      // Open in a new window/tab (Google blocks loading inside iframes)
+      // Open in a new window/tab (OAuth providers often block loading inside iframes)
       const popup = window.open(
         data.authUrl,
         "youtube-oauth",

@@ -18,16 +18,31 @@ export function VideoUrlInput({ onSubmit, isLoading }: VideoUrlInputProps) {
     }
   };
 
-  const isValidYoutubeUrl = (url: string) => {
+  const looksLikeYouTubeUrl = (value: string) => {
     const patterns = [
-      /^https?:\/\/(www\.)?youtube\.com\/watch\?v=[\w-]+/,
-      /^https?:\/\/youtu\.be\/[\w-]+/,
-      /^https?:\/\/(www\.)?youtube\.com\/shorts\/[\w-]+/,
+      /^https?:\/\/(www\.)?youtube\.com\/watch\?/i,
+      /^https?:\/\/youtu\.be\//i,
+      /^https?:\/\/(www\.)?youtube\.com\/shorts\//i,
     ];
-    return patterns.some((pattern) => pattern.test(url));
+    return patterns.some((pattern) => pattern.test(value));
   };
 
-  const isValid = isValidYoutubeUrl(url);
+  const isValidDirectVideoUrl = (value: string) => {
+    // Must be a direct downloadable file URL (not a YouTube page).
+    // Allow querystrings (e.g. signed URLs), but require a video-ish extension in the path.
+    try {
+      const u = new URL(value);
+      if (!/^https?:$/.test(u.protocol)) return false;
+      if (looksLikeYouTubeUrl(value)) return false;
+      const path = u.pathname.toLowerCase();
+      return /\.(mp4|mov|webm|mkv|m4v)(?:$)/.test(path);
+    } catch {
+      return false;
+    }
+  };
+
+  const isValid = isValidDirectVideoUrl(url) || looksLikeYouTubeUrl(url);
+  const isYouTube = looksLikeYouTubeUrl(url);
 
   return (
     <form onSubmit={handleSubmit} className="w-full space-y-4">
@@ -37,7 +52,7 @@ export function VideoUrlInput({ onSubmit, isLoading }: VideoUrlInputProps) {
         </div>
         <Input
           type="url"
-          placeholder="Paste YouTube video URL here..."
+          placeholder="Paste YouTube URL or direct video file URL (mp4/mov/webm)..."
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           className="h-14 pl-12 pr-4 text-base bg-secondary/50 border-border/50 focus:border-primary focus:ring-primary/20 placeholder:text-muted-foreground/60"
@@ -45,9 +60,15 @@ export function VideoUrlInput({ onSubmit, isLoading }: VideoUrlInputProps) {
         />
       </div>
       
-      {url && !isValid && (
+      {url && isYouTube && (
+        <p className="text-sm text-muted-foreground animate-fade-in">
+          YouTube URL detected. We'll download and transfer this video.
+        </p>
+      )}
+
+      {url && !isValid && !isYouTube && (
         <p className="text-sm text-destructive animate-fade-in">
-          Please enter a valid YouTube URL
+          Please enter a YouTube URL or a direct video file URL (must end with .mp4/.mov/.webm/.mkv/.m4v)
         </p>
       )}
       
@@ -65,7 +86,7 @@ export function VideoUrlInput({ onSubmit, isLoading }: VideoUrlInputProps) {
           </>
         ) : (
           <>
-            Transfer Video
+            {isYouTube ? "Download from YouTube" : "Use URL"}
             <ArrowRight className="h-5 w-5" />
           </>
         )}

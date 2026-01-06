@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { Header } from "@/components/Header";
 import { VideoUrlInput } from "@/components/VideoUrlInput";
+import { VideoFileInput } from "@/components/VideoFileInput";
 import { EditableVideoPreview } from "@/components/EditableVideoPreview";
 import { TransferStatus } from "@/components/TransferStatus";
 import { YouTubeConnect } from "@/components/YouTubeConnect";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Upload, Shield, Zap, Rocket } from "lucide-react";
@@ -30,6 +32,7 @@ interface YouTubeAuth {
 
 const Index = () => {
   const [status, setStatus] = useState<StatusStep>("idle");
+  const [mode, setMode] = useState<"youtube" | "direct" | "file">("youtube");
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [error, setError] = useState<string>("");
   const [progress, setProgress] = useState(0);
@@ -37,6 +40,8 @@ const Index = () => {
   const [customDescription, setCustomDescription] = useState("");
   const [youtubeAuth, setYoutubeAuth] = useState<YouTubeAuth | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [sourceUrl, setSourceUrl] = useState<string | null>(null);
 
   // Check for saved YouTube auth on mount + when OAuth finishes in another tab/window
   useEffect(() => {
@@ -66,7 +71,8 @@ const Index = () => {
 
   const extractVideoId = (url: string): string | null => {
     const patterns = [
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/)([^&\s?]+)/,
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/embed\/)([^&\s?/]+)/,
+      /(?:www\.)?youtube\.com\/shorts\/([^&\s?/]+)/,
     ];
     for (const pattern of patterns) {
       const match = url.match(pattern);
@@ -75,39 +81,104 @@ const Index = () => {
     return null;
   };
 
-  const handleFetchVideo = async (url: string) => {
-    const videoId = extractVideoId(url);
-    if (!videoId) {
-      toast.error("Could not extract video ID from URL");
-      return;
-    }
+  const looksLikeYouTubeUrl = (url: string): boolean => {
+    const patterns = [
+      /^https?:\/\/(www\.)?youtube\.com\/watch\?/i,
+      /^https?:\/\/youtu\.be\//i,
+      /^https?:\/\/(www\.)?youtube\.com\/shorts\//i,
+      /^https?:\/\/youtube\.com\/shorts\//i,
+    ];
+    return patterns.some((pattern) => pattern.test(url));
+  };
 
-    setStatus("fetching");
+  const isValidDirectVideoUrl = (url: string): boolean => {
+    try {
+      const u = new URL(url);
+      if (!/^https?:$/.test(u.protocol)) return false;
+      if (looksLikeYouTubeUrl(url)) return false;
+      const path = u.pathname.toLowerCase();
+      return /\.(mp4|mov|webm|mkv|m4v)(?:$)/.test(path);
+    } catch {
+      return false;
+    }
+  };
+
+  const handleFetchVideo = async (url: string) => {
+    setStatus("idle");
     setError("");
     setProgress(0);
     setUploadedVideoUrl(null);
+    setSelectedFile(null);
+    setSourceUrl(null);
 
-    try {
-      const { data: infoData, error: infoError } = await supabase.functions.invoke(
-        "youtube-transfer",
-        {
-          body: { action: "getVideoInfo", videoId },
-        }
-      );
-
-      if (infoError) throw new Error(infoError.message);
-      if (infoData.error) throw new Error(infoData.error);
-
-      setVideoInfo(infoData.video);
-      setCustomTitle(infoData.video.title);
-      setCustomDescription(infoData.video.description || "");
-      setStatus("idle");
-      toast.success("Video found! Edit the title and description, then connect your channel.");
-    } catch (err) {
-      setStatus("error");
-      setError(err instanceof Error ? err.message : "Failed to fetch video info");
-      toast.error("Failed to fetch video info");
+    if (!/^https?:\/\//i.test(url)) {
+      toast.error("Please paste a valid URL (http/https).");
+      return;
     }
+
+    // Check if it's a YouTube URL
+    if (looksLikeYouTubeUrl(url)) {
+      const videoId = extractVideoId(url);
+      if (!videoId) {
+        toast.error("Could not extract video ID from YouTube URL");
+        return;
+      }
+
+      setMode("youtube");
+      setStatus("fetching");
+      
+      try {
+        // Get video metadata from YouTube API
+        const { data: infoData, error: infoError } = await supabase.functions.invoke(
+          "youtube-transfer",
+          {
+            body: { action: "getVideoInfo", videoId },
+          }
+        );
+
+        if (infoError) throw new Error(infoError.message);
+        if (infoData.error) throw new Error(infoData.error);
+
+        setVideoInfo(infoData.video);
+        setCustomTitle(infoData.video.title);
+        setCustomDescription(infoData.video.description || "");
+        setStatus("idle");
+        toast.success("Video found! Edit the title and description, then connect your channel.");
+      } catch (err) {
+        setStatus("error");
+        setError(err instanceof Error ? err.message : "Failed to fetch video info");
+        toast.error("Failed to fetch video info");
+      }
+      return;
+    }
+
+    // Handle direct file URLs
+    if (isValidDirectVideoUrl(url)) {
+      setMode("direct");
+      setSourceUrl(url);
+
+      const now = new Date().toISOString();
+      const urlObj = new URL(url);
+      const lastPath = decodeURIComponent(urlObj.pathname.split("/").filter(Boolean).pop() || "");
+      const titleFromUrl = (lastPath.replace(/\.[^.]+$/, "") || "Untitled video").slice(0, 100);
+
+      const directInfo: VideoInfo = {
+        title: titleFromUrl,
+        description: "",
+        thumbnail: "/placeholder.svg",
+        channelTitle: "Direct URL",
+        publishedAt: now,
+        videoId: `direct-${Date.now()}`,
+      };
+
+      setVideoInfo(directInfo);
+      setCustomTitle(directInfo.title);
+      setCustomDescription("");
+      toast.success("URL ready! Edit the title/description, then connect your channel.");
+      return;
+    }
+
+    toast.error("Please enter a YouTube URL or a direct video file URL (mp4/mov/webm)");
   };
 
   const handleMetadataChange = (title: string, description: string) => {
@@ -115,8 +186,90 @@ const Index = () => {
     setCustomDescription(description);
   };
 
+  const handleSelectFile = async (file: File) => {
+    setMode("file");
+    setSelectedFile(file);
+    setUploadedVideoUrl(null);
+    setError("");
+    setProgress(0);
+    setSourceUrl(null);
+
+    const titleFromName = file.name.replace(/\.[^.]+$/, "");
+    const now = new Date().toISOString();
+    const localInfo: VideoInfo = {
+      title: titleFromName || "Untitled video",
+      description: "",
+      thumbnail: "/placeholder.svg",
+      channelTitle: "Local file",
+      publishedAt: now,
+      videoId: `local-${Date.now()}`,
+    };
+
+    setVideoInfo(localInfo);
+    setCustomTitle(localInfo.title);
+    setCustomDescription("");
+    setStatus("idle");
+    toast.success("File selected! Edit the title/description, then connect your channel.");
+  };
+
   const handleYouTubeConnect = (tokens: YouTubeAuth) => {
     setYoutubeAuth(tokens);
+  };
+
+  // Function to call Python service directly
+  const downloadFromPythonService = async (videoId: string): Promise<string | null> => {
+    // Get Python service URL from environment variable
+    // Default to localhost:8000 for local development
+    // Set VITE_PYTHON_DOWNLOADER_URL in .env file or environment
+    const pythonServiceUrl = import.meta.env.VITE_PYTHON_DOWNLOADER_URL || "http://localhost:8000";
+    
+    // If no URL is configured, skip Python service
+    if (!pythonServiceUrl || pythonServiceUrl === "false") {
+      console.log("Python service URL not configured, skipping...");
+      return null;
+    }
+    
+    try {
+      console.log(`🎯 Calling Python yt-dlp service at ${pythonServiceUrl}...`);
+      const response = await fetch(`${pythonServiceUrl}/download`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ videoId }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        console.log(`Python service returned ${response.status}: ${errorText.substring(0, 100)}`);
+        return null;
+      }
+
+      const data = await response.json();
+      if (data && data.downloadUrl) {
+        console.log("✅ Python yt-dlp service successfully provided download URL");
+        return data.downloadUrl;
+      }
+      
+      if (data && data.error) {
+        console.log(`❌ Python service error: ${data.error}`);
+        // Don't return null immediately - throw error so user sees it
+        throw new Error(`Python service: ${data.error}`);
+      }
+      
+      console.log("⚠️  Python service returned no download URL");
+      return null;
+    } catch (err) {
+      console.log(`Python service connection error:`, err);
+      // If it's a CORS or connection error, that's expected if service isn't running
+      if (err instanceof TypeError) {
+        if (err.message.includes("Failed to fetch") || err.message.includes("CORS")) {
+          console.log("⚠️  Python service not accessible - make sure it's running and CORS is enabled");
+          console.log("   Start with: npm run python:service");
+        }
+      }
+      return null;
+    }
   };
 
   const handleTransfer = async () => {
@@ -125,21 +278,124 @@ const Index = () => {
       return;
     }
 
-    setStatus("downloading");
+    if (mode === "file" && !selectedFile) {
+      toast.error("Please select a video file first");
+      return;
+    }
+    if (mode === "direct" && !sourceUrl) {
+      toast.error("Please paste a direct video file URL first");
+      return;
+    }
+    if (mode === "youtube" && !videoInfo?.videoId) {
+      toast.error("Please fetch a YouTube video first");
+      return;
+    }
+
+    setStatus(mode === "file" ? "fetching" : "downloading");
     setError("");
     setProgress(10);
 
     try {
-      // Step 1: Get download URL
-      const { data: downloadData, error: downloadError } = await supabase.functions.invoke(
-        "youtube-download",
-        {
-          body: { videoId: videoInfo.videoId },
-        }
-      );
+      let uploadSourceUrl: string | null = null;
 
-      if (downloadError || downloadData.error) {
-        throw new Error(downloadData?.error || downloadError?.message || "Failed to get download URL");
+      if (mode === "youtube") {
+        // Step 1: Try Python service FIRST (most reliable)
+        setStatus("downloading");
+        setProgress(15);
+        
+        console.log("🎯 Attempting to download using Python yt-dlp service...");
+        try {
+          const pythonDownloadUrl = await downloadFromPythonService(videoInfo.videoId);
+          
+          if (pythonDownloadUrl) {
+            // Python service succeeded - use it directly
+            uploadSourceUrl = pythonDownloadUrl;
+            setProgress(25);
+            console.log("✅ Using download URL from Python service");
+            toast.success("Downloaded using Python yt-dlp service");
+          } else {
+            // Python service failed or not available - fall back to Edge Function
+            console.log("⚠️  Python service not available, using Supabase Edge Function...");
+            setProgress(20);
+            
+            const { data: downloadData, error: downloadError } = await supabase.functions.invoke(
+              "youtube-download",
+              {
+                body: { videoId: videoInfo.videoId },
+              }
+            );
+
+            if (downloadError || downloadData.error) {
+              throw new Error(downloadData?.error || downloadError?.message || "Failed to get download URL");
+            }
+
+            uploadSourceUrl = downloadData.downloadUrl;
+            console.log("✅ Using download URL from Supabase Edge Function");
+          }
+        } catch (pythonError) {
+          // If Python service throws an error (not just returns null), show it but still try Edge Function
+          console.error("Python service error:", pythonError);
+          const pythonErrorMsg = pythonError instanceof Error ? pythonError.message : String(pythonError);
+          
+          // Only try Edge Function if Python error is not a critical failure
+          if (pythonErrorMsg.includes("not accessible") || pythonErrorMsg.includes("Failed to fetch")) {
+            console.log("Python service not running, trying Edge Function...");
+            setProgress(20);
+            
+            const { data: downloadData, error: downloadError } = await supabase.functions.invoke(
+              "youtube-download",
+              {
+                body: { videoId: videoInfo.videoId },
+              }
+            );
+
+            if (downloadError || downloadData.error) {
+              throw new Error(downloadData?.error || downloadError?.message || "Failed to get download URL");
+            }
+
+            uploadSourceUrl = downloadData.downloadUrl;
+          } else {
+            // Python service had a real error (video restriction, etc.) - throw it
+            throw pythonError;
+          }
+        }
+      } else if (mode === "direct") {
+        uploadSourceUrl = sourceUrl;
+      } else {
+        // Local file mode: upload file to Supabase Storage, then use that URL as the source
+        setStatus("downloading");
+        setProgress(20);
+
+        const bucket = import.meta.env.VITE_UPLOAD_BUCKET || "uploads";
+        const file = selectedFile!;
+        const safeName = file.name.replace(/[^\w.\-() ]+/g, "_");
+        const path = `incoming/${Date.now()}-${safeName}`;
+
+        const { error: uploadErr } = await supabase.storage
+          .from(bucket)
+          .upload(path, file, {
+            upsert: false,
+            contentType: file.type || "video/mp4",
+          });
+
+        if (uploadErr) {
+          throw new Error(
+            `Failed to upload file to Storage. Ensure bucket "${bucket}" exists and allows uploads. (${uploadErr.message})`
+          );
+        }
+
+        // Prefer signed URL (works even if bucket is private), fallback to public URL
+        const signed = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
+        if (!signed.error && signed.data?.signedUrl) {
+          uploadSourceUrl = signed.data.signedUrl;
+        } else {
+          const pub = supabase.storage.from(bucket).getPublicUrl(path);
+          uploadSourceUrl = pub.data.publicUrl;
+        }
+      }
+
+      if (!uploadSourceUrl) {
+        throw new Error("No upload source URL available");
       }
 
       setProgress(30);
@@ -151,7 +407,7 @@ const Index = () => {
         {
           body: {
             accessToken: youtubeAuth.accessToken,
-            downloadUrl: downloadData.downloadUrl,
+            downloadUrl: uploadSourceUrl,
             title: customTitle || videoInfo.title,
             description: customDescription || videoInfo.description,
           },
@@ -182,6 +438,9 @@ const Index = () => {
     setCustomTitle("");
     setCustomDescription("");
     setUploadedVideoUrl(null);
+    setSelectedFile(null);
+    setSourceUrl(null);
+    setMode("youtube");
   };
 
   const isProcessing = status === "fetching" || status === "downloading" || status === "uploading";
@@ -201,10 +460,26 @@ const Index = () => {
         </div>
 
         <div className="glass-card p-8 mb-8 animate-fade-in" style={{ animationDelay: "0.1s" }}>
-          <VideoUrlInput
-            onSubmit={handleFetchVideo}
-            isLoading={status === "fetching"}
-          />
+          <Tabs value={mode} onValueChange={(v) => setMode(v as "youtube" | "direct" | "file")}>
+            <TabsList className="mb-6">
+              <TabsTrigger value="youtube">YouTube URL</TabsTrigger>
+              <TabsTrigger value="direct">Direct File URL</TabsTrigger>
+              <TabsTrigger value="file">Local File</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="youtube">
+              <VideoUrlInput onSubmit={handleFetchVideo} isLoading={status === "fetching"} />
+            </TabsContent>
+            <TabsContent value="direct">
+              <VideoUrlInput onSubmit={handleFetchVideo} isLoading={status === "fetching"} />
+            </TabsContent>
+            <TabsContent value="file">
+              <VideoFileInput onSelect={handleSelectFile} isLoading={status === "fetching"} />
+              <p className="text-xs text-muted-foreground mt-3 text-center">
+                This mode uploads a file you already have. It does not download from YouTube.
+              </p>
+            </TabsContent>
+          </Tabs>
         </div>
 
         {videoInfo && status !== "complete" && (
@@ -246,7 +521,7 @@ const Index = () => {
 
         {(status === "downloading" || status === "uploading") && (
           <div className="mt-6">
-            <TransferStatus status={status} error={error} progress={progress} />
+            <TransferStatus status={status} error={error} progress={progress} mode={mode} />
           </div>
         )}
 
@@ -274,7 +549,7 @@ const Index = () => {
 
         {status === "error" && (
           <div className="mt-6">
-            <TransferStatus status={status} error={error} progress={progress} />
+            <TransferStatus status={status} error={error} progress={progress} mode={mode} />
             <div className="text-center mt-4">
               <Button onClick={handleReset} variant="outline">
                 Try Again

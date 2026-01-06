@@ -5,6 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:full": "concurrently \"npm run dev\" \"npm run python:service\"",
+    "python:service": "node scripts/start-python-service.js",
+    "python:install": "node scripts/install-python-deps.js",
+    "python:setup": "./setup-python.sh",
+    "python:check": "python3 --version && pip3 --version || python --version && pip --version",
+    "setup": "npm install && npm run python:install",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
@@ -79,6 +85,7 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.38.0",
-    "vite": "^5.4.19"
+    "vite": "^5.4.19",
+    "concurrently": "^9.1.0"
   }
 }
