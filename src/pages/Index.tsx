@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Header } from "@/components/Header";
 import { VideoUrlInput } from "@/components/VideoUrlInput";
 import { EditableVideoPreview } from "@/components/EditableVideoPreview";
@@ -37,6 +37,20 @@ const Index = () => {
   const [customDescription, setCustomDescription] = useState("");
   const [youtubeAuth, setYoutubeAuth] = useState<YouTubeAuth | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+
+  // Check for saved YouTube auth on mount
+  useEffect(() => {
+    const savedAuth = localStorage.getItem("youtube_auth");
+    if (savedAuth) {
+      try {
+        const auth = JSON.parse(savedAuth);
+        setYoutubeAuth(auth);
+        toast.success(`Connected to ${auth.channel?.title || "YouTube"}!`);
+      } catch (e) {
+        localStorage.removeItem("youtube_auth");
+      }
+    }
+  }, []);
 
   const extractVideoId = (url: string): string | null => {
     const patterns = [

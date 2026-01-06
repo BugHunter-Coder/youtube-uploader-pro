@@ -27,66 +27,11 @@ export function YouTubeConnect({ onConnect, isConnected, channelInfo }: YouTubeC
         throw new Error(data?.error || error?.message || "Failed to get auth URL");
       }
 
-      // Open OAuth popup
-      const popup = window.open(
-        data.authUrl,
-        "youtube-oauth",
-        "width=600,height=700,scrollbars=yes"
-      );
-
-      if (!popup) {
-        throw new Error("Popup blocked. Please allow popups for this site.");
-      }
-
-      // Listen for the callback
-      const handleMessage = async (event: MessageEvent) => {
-        if (event.origin !== window.location.origin) return;
-        
-        if (event.data.type === "youtube-oauth-callback") {
-          window.removeEventListener("message", handleMessage);
-          popup.close();
-
-          if (event.data.error) {
-            throw new Error(event.data.error);
-          }
-
-          // Exchange code for tokens
-          const { data: tokenData, error: tokenError } = await supabase.functions.invoke(
-            "youtube-oauth",
-            {
-              body: {
-                action: "exchangeCode",
-                code: event.data.code,
-                redirectUri,
-              },
-            }
-          );
-
-          if (tokenError || tokenData.error) {
-            throw new Error(tokenData?.error || tokenError?.message || "Failed to exchange code");
-          }
-
-          onConnect({
-            accessToken: tokenData.accessToken,
-            refreshToken: tokenData.refreshToken,
-            channel: tokenData.channel,
-          });
-
-          toast.success(`Connected to ${tokenData.channel?.title || "YouTube"}!`);
-          setIsConnecting(false);
-        }
-      };
-
-      window.addEventListener("message", handleMessage);
-
-      // Cleanup on popup close
-      const checkClosed = setInterval(() => {
-        if (popup.closed) {
-          clearInterval(checkClosed);
-          window.removeEventListener("message", handleMessage);
-          setIsConnecting(false);
-        }
-      }, 500);
+      // Save current state to localStorage before redirect
+      localStorage.setItem("youtube_oauth_pending", "true");
+      
+      // Full page redirect instead of popup
+      window.location.href = data.authUrl;
 
     } catch (error) {
       console.error("OAuth error:", error);
