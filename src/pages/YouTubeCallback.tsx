@@ -29,7 +29,7 @@ const YouTubeCallback = () => {
 
       try {
         const redirectUri = `${window.location.origin}/youtube-callback`;
-        
+
         // Exchange code for tokens
         const { data: tokenData, error: tokenError } = await supabase.functions.invoke(
           "youtube-oauth",
@@ -47,14 +47,23 @@ const YouTubeCallback = () => {
         }
 
         // Save tokens to localStorage
-        localStorage.setItem("youtube_auth", JSON.stringify({
-          accessToken: tokenData.accessToken,
-          refreshToken: tokenData.refreshToken,
-          channel: tokenData.channel,
-        }));
+        localStorage.setItem(
+          "youtube_auth",
+          JSON.stringify({
+            accessToken: tokenData.accessToken,
+            refreshToken: tokenData.refreshToken,
+            channel: tokenData.channel,
+          })
+        );
         localStorage.removeItem("youtube_oauth_pending");
 
-        // Redirect back to home
+        // If this was opened as a popup, close it; otherwise go back home
+        try {
+          window.close();
+        } catch {
+          // ignore
+        }
+
         navigate("/");
       } catch (err) {
         console.error("OAuth callback error:", err);

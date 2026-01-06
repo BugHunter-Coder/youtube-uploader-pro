@@ -15,10 +15,10 @@ export function YouTubeConnect({ onConnect, isConnected, channelInfo }: YouTubeC
 
   const handleConnect = async () => {
     setIsConnecting(true);
-    
+
     try {
       const redirectUri = `${window.location.origin}/youtube-callback`;
-      
+
       const { data, error } = await supabase.functions.invoke("youtube-oauth", {
         body: { action: "getAuthUrl", redirectUri },
       });
@@ -27,12 +27,42 @@ export function YouTubeConnect({ onConnect, isConnected, channelInfo }: YouTubeC
         throw new Error(data?.error || error?.message || "Failed to get auth URL");
       }
 
-      // Save current state to localStorage before redirect
-      localStorage.setItem("youtube_oauth_pending", "true");
-      
-      // Full page redirect instead of popup
-      window.location.href = data.authUrl;
+      // Open in a new window/tab (Google blocks loading inside iframes)
+      const popup = window.open(
+        data.authUrl,
+        "youtube-oauth",
+        "width=600,height=700,scrollbars=yes"
+      );
 
+      if (!popup) {
+        throw new Error("Popup blocked. Please allow popups for this site.");
+      }
+
+      // Poll localStorage (callback page stores tokens there)
+      const poll = window.setInterval(() => {
+        try {
+          if (popup.closed) {
+            window.clearInterval(poll);
+            setIsConnecting(false);
+            return;
+          }
+
+          const saved = localStorage.getItem("youtube_auth");
+          if (!saved) return;
+
+          const auth = JSON.parse(saved);
+          if (!auth?.accessToken) return;
+
+          window.clearInterval(poll);
+          popup.close();
+
+          onConnect(auth);
+          toast.success(`Connected to ${auth.channel?.title || "YouTube"}!`);
+          setIsConnecting(false);
+        } catch {
+          // ignore JSON errors while polling
+        }
+      }, 500);
     } catch (error) {
       console.error("OAuth error:", error);
       toast.error(error instanceof Error ? error.message : "Connection failed");

@@ -38,18 +38,30 @@ const Index = () => {
   const [youtubeAuth, setYoutubeAuth] = useState<YouTubeAuth | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
 
-  // Check for saved YouTube auth on mount
+  // Check for saved YouTube auth on mount + when OAuth finishes in another tab/window
   useEffect(() => {
-    const savedAuth = localStorage.getItem("youtube_auth");
-    if (savedAuth) {
+    const loadAuth = () => {
+      const savedAuth = localStorage.getItem("youtube_auth");
+      if (!savedAuth) return;
+
       try {
         const auth = JSON.parse(savedAuth);
         setYoutubeAuth(auth);
-        toast.success(`Connected to ${auth.channel?.title || "YouTube"}!`);
-      } catch (e) {
+      } catch {
         localStorage.removeItem("youtube_auth");
       }
-    }
+    };
+
+    loadAuth();
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "youtube_auth") {
+        loadAuth();
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   const extractVideoId = (url: string): string | null => {
