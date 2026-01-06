@@ -5,6 +5,70 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// List of public Cobalt instances (v8 API)
+const COBALT_INSTANCES = [
+  "https://cobalt.api.timelessnesses.me",
+  "https://api.cobalt.tools",
+  "https://cobalt-api.kwiatekmiki.com",
+];
+
+async function tryDownloadFromCobalt(videoId: string): Promise<{ downloadUrl: string } | null> {
+  for (const instance of COBALT_INSTANCES) {
+    try {
+      console.log(`Trying Cobalt instance: ${instance}`);
+      
+      const response = await fetch(instance, {
+        method: "POST",
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          videoQuality: "1080",
+          filenameStyle: "basic",
+          downloadMode: "auto",
+        }),
+      });
+
+      if (!response.ok) {
+        console.log(`Instance ${instance} returned ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      console.log(`Instance ${instance} response:`, JSON.stringify(data).slice(0, 200));
+
+      if (data.status === "error") {
+        console.log(`Instance ${instance} error: ${data.error?.code || data.text}`);
+        continue;
+      }
+
+      // v8 API returns url directly or in picker
+      if (data.url) {
+        return { downloadUrl: data.url };
+      }
+
+      if (data.picker && data.picker.length > 0) {
+        const videoOption = data.picker.find((p: any) => p.type === "video") || data.picker[0];
+        if (videoOption?.url) {
+          return { downloadUrl: videoOption.url };
+        }
+      }
+
+      // Legacy v7 format
+      if (data.status === "redirect" || data.status === "stream") {
+        return { downloadUrl: data.url };
+      }
+
+    } catch (err) {
+      console.log(`Instance ${instance} failed:`, err);
+      continue;
+    }
+  }
+  return null;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -13,57 +77,23 @@ serve(async (req) => {
   try {
     const { videoId } = await req.json();
 
-    console.log(`Downloading video: ${videoId}`);
+    console.log(`Attempting to get download URL for video: ${videoId}`);
 
-    // Use cobalt.tools API to get download URL
-    const cobaltResponse = await fetch("https://api.cobalt.tools/api/json", {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        vCodec: "h264",
-        vQuality: "1080",
-        aFormat: "mp3",
-        filenamePattern: "basic",
-        isAudioOnly: false,
-        disableMetadata: false,
-      }),
-    });
+    const result = await tryDownloadFromCobalt(videoId);
 
-    const cobaltData = await cobaltResponse.json();
-
-    console.log("Cobalt response status:", cobaltData.status);
-
-    if (cobaltData.status === "error") {
-      throw new Error(cobaltData.text || "Failed to get download URL");
-    }
-
-    if (cobaltData.status === "redirect" || cobaltData.status === "stream") {
+    if (result) {
+      console.log("Successfully got download URL");
       return new Response(
         JSON.stringify({ 
-          downloadUrl: cobaltData.url,
+          downloadUrl: result.downloadUrl,
           status: "ready"
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    if (cobaltData.status === "picker") {
-      // Multiple formats available, pick the best video
-      const videoOption = cobaltData.picker?.find((p: any) => p.type === "video") || cobaltData.picker?.[0];
-      return new Response(
-        JSON.stringify({ 
-          downloadUrl: videoOption?.url,
-          status: "ready"
-        }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    throw new Error("Unexpected response from download service");
+    // If all Cobalt instances fail, return error with helpful message
+    throw new Error("Unable to process this video. The video may be restricted, private, or unavailable for download.");
 
   } catch (error) {
     console.error("Download error:", error);
